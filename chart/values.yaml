@@ -1,0 +1,107 @@
+# -----------------------------------------------------------------------------
+# Mirrorgate Helm values
+# -----------------------------------------------------------------------------
+# Override these in your env-specific values file. Anything left empty here is
+# either optional or expected to come from an out-of-band Kubernetes Secret.
+# -----------------------------------------------------------------------------
+
+# Number of replicas. Mirrorgate keeps job state in-memory, so >1 replicas split
+# the job queue across pods. Stick with 1 unless you understand that trade-off.
+replicaCount: 1
+
+image:
+  repository: ""          # e.g. registry.example.com/devops/mirrorgate
+  tag: ""                 # e.g. v0.1.0
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+  # - name: registry-pull-secret
+
+# -----------------------------------------------------------------------------
+# Destination registry (required)
+# -----------------------------------------------------------------------------
+# The host Mirrorgate copies INTO. Skopeo will push to "{host}/{image}:{tag}".
+nexus:
+  host: ""                # e.g. registry.example.com  (required)
+  user: ""                # username for the destination registry
+  # Password is read from an existing Secret, NOT from values.yaml. Create it
+  # out of band:
+  #   kubectl create secret generic mirrorgate-nexus \
+  #     --from-literal=NEXUS_PASS='...'
+  passwordSecret:
+    name: ""              # name of the Secret holding the password
+    key: NEXUS_PASS       # key inside the Secret
+
+# -----------------------------------------------------------------------------
+# API authentication (optional)
+# -----------------------------------------------------------------------------
+# If apiKeySecret.name is set, requests to /api/* must send X-API-Key.
+# If left empty, the API is open inside the cluster.
+apiKeySecret:
+  name: ""                # e.g. mirrorgate-api
+  key: API_KEY
+
+# -----------------------------------------------------------------------------
+# Outbound proxy (optional)
+# -----------------------------------------------------------------------------
+# Set this if pulls to public registries have to traverse a corporate proxy.
+corporateProxy: ""        # e.g. http://proxy.example.com:8080
+
+# Extra hosts that should bypass the proxy. NEXUS_REGISTRY, localhost and
+# 127.0.0.1 are added automatically.
+noProxyExtra: ""          # e.g. .internal,.local
+
+# -----------------------------------------------------------------------------
+# App tuning
+# -----------------------------------------------------------------------------
+config:
+  port: 8080
+  workers: 3
+  historySize: 500
+  healthCheckInterval: 30
+
+# -----------------------------------------------------------------------------
+# Kubernetes / OpenShift wiring
+# -----------------------------------------------------------------------------
+service:
+  type: ClusterIP
+  port: 8080
+
+# OpenShift Route. Set enabled=true on OCP, leave false on plain Kubernetes
+# and use an Ingress (not shipped with this chart yet).
+openshift:
+  route:
+    enabled: false
+    host: ""              # e.g. mirrorgate.apps.example.com (optional)
+    tls:
+      termination: edge
+      insecureEdgeTerminationPolicy: Redirect
+
+serviceAccount:
+  create: true
+  name: ""                # leave empty to use <release>-mirrorgate
+
+podSecurityContext: {}
+
+securityContext: {}
+  # OpenShift assigns a random UID at runtime. Leaving this empty lets the
+  # platform pick. On plain Kubernetes you may want:
+  # runAsNonRoot: true
+  # runAsUser: 1000
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 1000m
+    memory: 1Gi
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# Extra environment variables passed through to the container.
+extraEnv: []
+  # - name: SOME_FLAG
+  #   value: "true"

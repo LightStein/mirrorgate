@@ -1,0 +1,25 @@
+{% if not job %}
+<div class="drawer-inner">
+  <div class="drawer-head">
+    <span>─[ <span class="id">log</span>: not found ]</span>
+    <span class="pad"></span>
+    <button class="btn-mini" hx-get="/ui/drawer/close" hx-target="#drawer" hx-swap="innerHTML">x</button>
+  </div>
+</div>
+{% else %}
+<div class="drawer-inner">
+  <div class="drawer-head">
+    <span>─[ <span class="id">log</span>: <span class="id">{{ job.id }}</span> ]</span>
+    <span>·</span>
+    <span class="state {{ job.state }}">{{ job.state }}</span>
+    <span>·</span>
+    <span class="muted">{{ job.src_registry }}/{{ job.src_image }}:{{ job.src_tag }} → {{ job.dest_image }}:{{ job.dest_tag }}</span>
+    <span class="pad"></span>
+    <button class="btn-mini" hx-get="/ui/drawer/close" hx-target="#drawer" hx-swap="innerHTML">x</button>
+  </div>
+  {% if job.error_category %}
+    <div class="err-inline"><b>{{ job.error_category }}:</b> {{ job.error_hint }}</div>
+  {% endif %}
+  <pre class="log">{% if job.log %}{{ job.log }}{% else %}(no log yet — job is still {{ job.state }}){% endif %}</pre>
+</div>
+{% endif %}

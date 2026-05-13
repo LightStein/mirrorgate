@@ -1,0 +1,24 @@
+Mirrorgate is installed.
+
+1. Wait for the pod to be ready:
+   kubectl -n {{ .Release.Namespace }} rollout status deploy/{{ include "mirrorgate.fullname" . }}
+
+2. Port-forward to test locally:
+   kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "mirrorgate.fullname" . }} 8080:{{ .Values.service.port }}
+   curl http://localhost:8080/health
+
+{{- if .Values.openshift.route.enabled }}
+
+3. The OpenShift Route is enabled. Find its host:
+   oc -n {{ .Release.Namespace }} get route {{ include "mirrorgate.fullname" . }} -o jsonpath='{.spec.host}'
+{{- end }}
+
+4. Trigger a copy (replace placeholders):
+   curl -X POST http://<mirrorgate-host>/api/copy \
+     -H 'Content-Type: application/json' \
+{{- if .Values.apiKeySecret.name }}
+     -H 'X-API-Key: <your-api-key>' \
+{{- end }}
+     -d '{"src":"docker.io/library/nginx:1.27","dest":"library/nginx:1.27"}'
+
+Destination registry: {{ .Values.nexus.host }}

@@ -1,0 +1,19 @@
+<section id="strip"
+         hx-get="/ui/strip"
+         hx-trigger="every 30s"
+         hx-swap="outerHTML">
+  <div class="rule"><span class="label">──[ <b>registries</b> ]</span></div>
+  <div class="strip">
+    {% for r in registries %}
+      {% set glyph = '?' %}
+      {% if r.state == 'green' %}{% set glyph = '+' %}
+      {% elif r.state == 'yellow' %}{% set glyph = '!' %}
+      {% elif r.state == 'red' %}{% set glyph = '-' %}
+      {% else %}{% set glyph = '·' %}
+      {% endif %}
+      <span class="reg {{ r.state }}" title="{{ r.last_error or 'OK' }} ({{ r.last_checked or 'never' }})">
+        <span class="glyph">[{{ glyph }}]</span> <span class="name">{{ r.name }}</span>
+      </span>
+    {% endfor %}
+  </div>
+</section>

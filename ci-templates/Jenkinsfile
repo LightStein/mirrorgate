@@ -1,0 +1,144 @@
+// =============================================================================
+// Jenkins Pipeline: Mirrorgate Integration
+// =============================================================================
+// Copy this into your Jenkinsfile or load it as a shared library.
+//
+// Required Jenkins credentials / parameters:
+//   - MIRRORGATE_URL        e.g. http://mirrorgate.example.svc.cluster.local:8080
+//   - DEST_REGISTRY         destination registry host, e.g. registry.example.com
+//   - MIRRORGATE_API_KEY    (Secret text) optional, only if the deployment requires it
+//
+// Usage:
+//   syncImage(
+//     srcRegistry: 'docker.io',
+//     srcImage:    'library/nginx',
+//     srcTag:      '1.27',
+//     destImage:   'mirror/nginx',  // optional, defaults to srcImage
+//     destTag:     '1.27'           // optional, defaults to srcTag
+//   )
+// =============================================================================
+
+/**
+ * Sync an image through Mirrorgate.
+ *
+ * @param config Map with:
+ *   - srcRegistry: Source registry (default: docker.io)
+ *   - srcImage:    Source image name (required)
+ *   - srcTag:      Source tag (required)
+ *   - destImage:   Destination image (default: srcImage)
+ *   - destTag:     Destination tag (default: srcTag)
+ */
+def syncImage(Map config) {
+    def srcRegistry = config.srcRegistry ?: 'docker.io'
+    def srcImage    = config.srcImage
+    def srcTag      = config.srcTag
+    def destImage   = config.destImage ?: srcImage
+    def destTag     = config.destTag   ?: srcTag
+
+    if (!srcImage || !srcTag) {
+        error "srcImage and srcTag are required"
+    }
+    if (!env.MIRRORGATE_URL) {
+        error "MIRRORGATE_URL environment variable is required"
+    }
+    if (!env.DEST_REGISTRY) {
+        error "DEST_REGISTRY environment variable is required"
+    }
+
+    echo "Mirrorgate copy:"
+    echo "  src:  ${srcRegistry}/${srcImage}:${srcTag}"
+    echo "  dest: ${env.DEST_REGISTRY}/${destImage}:${destTag}"
+
+    def payload = """{"src":"${srcRegistry}/${srcImage}:${srcTag}","dest":"${destImage}:${destTag}"}"""
+
+    // Use an API key if one is configured; otherwise call without auth.
+    def hasKey = false
+    try {
+        withCredentials([string(credentialsId: 'MIRRORGATE_API_KEY', variable: 'API_KEY')]) {
+            hasKey = true
+        }
+    } catch (ignored) {
+        hasKey = false
+    }
+
+    def httpCode
+    if (hasKey) {
+        withCredentials([string(credentialsId: 'MIRRORGATE_API_KEY', variable: 'API_KEY')]) {
+            httpCode = sh(returnStdout: true, script: """
+                curl -sS -o /tmp/mirrorgate-body -w '%{http_code}' \\
+                  -X POST '${env.MIRRORGATE_URL}/api/copy' \\
+                  -H 'Content-Type: application/json' \\
+                  -H "X-API-Key: \${API_KEY}" \\
+                  -d '${payload}'
+            """).trim()
+        }
+    } else {
+        httpCode = sh(returnStdout: true, script: """
+            curl -sS -o /tmp/mirrorgate-body -w '%{http_code}' \\
+              -X POST '${env.MIRRORGATE_URL}/api/copy' \\
+              -H 'Content-Type: application/json' \\
+              -d '${payload}'
+        """).trim()
+    }
+
+    sh "cat /tmp/mirrorgate-body && echo"
+
+    if (httpCode != '200' && httpCode != '202') {
+        error "Mirrorgate refused the job: HTTP ${httpCode}"
+    }
+}
+
+// =============================================================================
+// Example Pipeline
+// =============================================================================
+
+pipeline {
+    agent any
+
+    parameters {
+        string(name: 'SRC_REGISTRY', defaultValue: 'docker.io', description: 'Source registry')
+        string(name: 'SRC_IMAGE',    defaultValue: '',          description: 'Source image (e.g. library/nginx)')
+        string(name: 'SRC_TAG',      defaultValue: '',          description: 'Source tag (e.g. 1.27)')
+        string(name: 'DEST_IMAGE',   defaultValue: '',          description: 'Destination image (default: same as source)')
+        string(name: 'DEST_TAG',     defaultValue: '',          description: 'Destination tag (default: same as source)')
+    }
+
+    environment {
+        // Set these in the Jenkins job config or via folder-level env vars.
+        // MIRRORGATE_URL = 'http://mirrorgate.example.svc.cluster.local:8080'
+        // DEST_REGISTRY  = 'registry.example.com'
+        MIRRORGATE_URL = "${env.MIRRORGATE_URL ?: ''}"
+        DEST_REGISTRY  = "${env.DEST_REGISTRY  ?: ''}"
+    }
+
+    stages {
+        stage('Sync Image') {
+            when {
+                expression { params.SRC_IMAGE && params.SRC_TAG }
+            }
+            steps {
+                script {
+                    syncImage(
+                        srcRegistry: params.SRC_REGISTRY,
+                        srcImage:    params.SRC_IMAGE,
+                        srcTag:      params.SRC_TAG,
+                        destImage:   params.DEST_IMAGE ?: params.SRC_IMAGE,
+                        destTag:     params.DEST_TAG   ?: params.SRC_TAG
+                    )
+                }
+            }
+        }
+    }
+}
+
+// =============================================================================
+// Shared Library variant (vars/syncImage.groovy)
+// =============================================================================
+// def call(Map config) {
+//     // same body as syncImage() above
+// }
+//
+// In your Jenkinsfile:
+//   @Library('your-shared-lib') _
+//   syncImage(srcImage: 'library/nginx', srcTag: '1.27')
+// =============================================================================

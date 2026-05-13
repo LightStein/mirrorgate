@@ -1,0 +1,18 @@
+apiVersion: v2
+name: mirrorgate
+description: Mirror container images from public registries into a private destination registry.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/LightStein/mirrorgate
+sources:
+  - https://github.com/LightStein/mirrorgate
+keywords:
+  - registry
+  - mirror
+  - skopeo
+  - openshift
+  - kubernetes
+maintainers:
+  - name: LightStein
+    url: https://github.com/LightStein

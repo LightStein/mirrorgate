@@ -1,0 +1,90 @@
+# =============================================================================
+# GitLab CI Template: Mirrorgate Integration
+# =============================================================================
+# Copy this into your .gitlab-ci.yml or include it from a shared templates repo.
+#
+# Required CI/CD variables (Settings -> CI/CD -> Variables):
+#   - MIRRORGATE_URL        e.g. http://mirrorgate.<namespace>.svc.cluster.local:8080
+#   - DEST_REGISTRY         destination registry host, e.g. registry.example.com
+#   - MIRRORGATE_API_KEY    optional, only if the deployment requires it
+#
+# Per-job variables:
+#   - SRC_REGISTRY          source registry, defaults to docker.io
+#   - SRC_IMAGE             source image (e.g. library/nginx or org/app)
+#   - SRC_TAG               source tag (e.g. v1.2.3)
+#   - DEST_IMAGE            destination image path, defaults to SRC_IMAGE
+#   - DEST_TAG              destination tag, defaults to SRC_TAG
+# =============================================================================
+
+variables:
+  SRC_REGISTRY: "docker.io"
+
+# -----------------------------------------------------------------------------
+# Reusable template
+# -----------------------------------------------------------------------------
+.mirrorgate-copy:
+  stage: deploy
+  image: curlimages/curl:latest
+  script:
+    - |
+      : "${MIRRORGATE_URL:?MIRRORGATE_URL is required}"
+      : "${DEST_REGISTRY:?DEST_REGISTRY is required}"
+      : "${SRC_IMAGE:?SRC_IMAGE is required}"
+      : "${SRC_TAG:?SRC_TAG is required}"
+
+      DEST_IMAGE="${DEST_IMAGE:-$SRC_IMAGE}"
+      DEST_TAG="${DEST_TAG:-$SRC_TAG}"
+
+      echo "Mirrorgate copy:"
+      echo "  src:  ${SRC_REGISTRY}/${SRC_IMAGE}:${SRC_TAG}"
+      echo "  dest: ${DEST_REGISTRY}/${DEST_IMAGE}:${DEST_TAG}"
+
+      PAYLOAD=$(cat <<EOF
+      {
+        "src":  "${SRC_REGISTRY}/${SRC_IMAGE}:${SRC_TAG}",
+        "dest": "${DEST_IMAGE}:${DEST_TAG}"
+      }
+      EOF
+      )
+
+      AUTH_ARGS=()
+      if [ -n "${MIRRORGATE_API_KEY:-}" ]; then
+        AUTH_ARGS=(-H "X-API-Key: ${MIRRORGATE_API_KEY}")
+      fi
+
+      HTTP_CODE=$(curl -sS -o /tmp/body -w '%{http_code}' \
+        -X POST "${MIRRORGATE_URL}/api/copy" \
+        -H 'Content-Type: application/json' \
+        "${AUTH_ARGS[@]}" \
+        -d "${PAYLOAD}")
+
+      cat /tmp/body
+      echo
+
+      if [ "${HTTP_CODE}" != "202" ] && [ "${HTTP_CODE}" != "200" ]; then
+        echo "Mirrorgate refused the job: HTTP ${HTTP_CODE}"
+        exit 1
+      fi
+
+# -----------------------------------------------------------------------------
+# Example jobs
+# -----------------------------------------------------------------------------
+
+# Sync on tag push
+sync-image:
+  extends: .mirrorgate-copy
+  variables:
+    SRC_IMAGE: "${CI_PROJECT_NAMESPACE}/${CI_PROJECT_NAME}"
+    SRC_TAG: "${CI_COMMIT_TAG}"
+  rules:
+    - if: $CI_COMMIT_TAG
+
+# Manual sync with parameters set at trigger time
+sync-custom:
+  extends: .mirrorgate-copy
+  variables:
+    SRC_REGISTRY: "docker.io"
+    SRC_IMAGE: ""
+    SRC_TAG: ""
+  rules:
+    - when: manual

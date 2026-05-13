@@ -1,0 +1,116 @@
+{{- if not .Values.image.repository -}}
+{{- fail "image.repository is required (set it to the full image repo, e.g. registry.example.com/devops/mirrorgate)" -}}
+{{- end -}}
+{{- if not .Values.image.tag -}}
+{{- fail "image.tag is required" -}}
+{{- end -}}
+{{- if not .Values.nexus.host -}}
+{{- fail "nexus.host is required (set it to the destination registry host)" -}}
+{{- end -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "mirrorgate.fullname" . }}
+  labels:
+    {{- include "mirrorgate.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "mirrorgate.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "mirrorgate.selectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "mirrorgate.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: mirrorgate
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.config.port }}
+              protocol: TCP
+          env:
+            - name: NEXUS_REGISTRY
+              value: {{ .Values.nexus.host | quote }}
+            {{- if .Values.nexus.user }}
+            - name: NEXUS_USER
+              value: {{ .Values.nexus.user | quote }}
+            {{- end }}
+            {{- if .Values.nexus.passwordSecret.name }}
+            - name: NEXUS_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.nexus.passwordSecret.name }}
+                  key: {{ .Values.nexus.passwordSecret.key }}
+            {{- end }}
+            {{- if .Values.apiKeySecret.name }}
+            - name: API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.apiKeySecret.name }}
+                  key: {{ .Values.apiKeySecret.key }}
+            {{- end }}
+            {{- if .Values.corporateProxy }}
+            - name: CORPORATE_PROXY
+              value: {{ .Values.corporateProxy | quote }}
+            {{- end }}
+            {{- if .Values.noProxyExtra }}
+            - name: NO_PROXY_EXTRA
+              value: {{ .Values.noProxyExtra | quote }}
+            {{- end }}
+            - name: PORT
+              value: {{ .Values.config.port | quote }}
+            - name: WORKERS
+              value: {{ .Values.config.workers | quote }}
+            - name: HISTORY_SIZE
+              value: {{ .Values.config.historySize | quote }}
+            - name: HEALTH_CHECK_INTERVAL
+              value: {{ .Values.config.healthCheckInterval | quote }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

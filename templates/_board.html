@@ -1,0 +1,57 @@
+<div id="board"
+     class="board"
+     hx-get="/ui/board"
+     hx-trigger="every 2s, refresh"
+     hx-swap="outerHTML">
+  <div class="row head">
+    <span>state</span>
+    <span>source</span>
+    <span>destination</span>
+    <span>created</span>
+    <span>failure</span>
+    <span>actions</span>
+  </div>
+  {% if not jobs %}
+    <div class="empty">— no jobs yet —</div>
+  {% endif %}
+  {% for j in jobs %}
+    <div class="row">
+      <span class="state {{ j.state }}">{{ j.state }}</span>
+      <span class="src"><span class="reg-prefix">{{ j.src_registry }}/</span>{{ j.src_image }}:{{ j.src_tag }}</span>
+      <span class="dest">{{ j.dest_image }}:{{ j.dest_tag }}</span>
+      <span class="age">{{ j.created_at[11:19] }}Z</span>
+      <span>
+        {% if j.error_category %}
+          <span class="cat-failed">{{ j.error_category }}</span>
+        {% else %}
+          <span style="color: var(--dim)">—</span>
+        {% endif %}
+      </span>
+      <span class="actions">
+        <button class="btn-mini"
+                hx-get="/ui/jobs/{{ j.id }}/log"
+                hx-target="#drawer"
+                hx-swap="innerHTML"
+                title="view full log">log</button>
+        {% if j.state in ('queued', 'pulling', 'pushing') %}
+          <button class="btn-mini danger"
+                  hx-post="/ui/jobs/{{ j.id }}/cancel"
+                  hx-target="#board"
+                  hx-swap="outerHTML"
+                  title="cancel">cancel</button>
+        {% elif j.state in ('failed', 'cancelled') %}
+          <button class="btn-mini"
+                  hx-post="/ui/jobs/{{ j.id }}/retry"
+                  hx-target="#board"
+                  hx-swap="outerHTML"
+                  title="re-queue with same parameters">retry</button>
+        {% endif %}
+      </span>
+    </div>
+    {% if j.error_hint %}
+      <div class="row err-row">
+        <div class="err-inline"><b>{{ j.error_category }}:</b> {{ j.error_hint }}</div>
+      </div>
+    {% endif %}
+  {% endfor %}
+</div>

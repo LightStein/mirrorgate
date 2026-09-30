@@ -43,8 +43,11 @@ Only the path and tag come from the request.
 ## API
 
 All `/api/*` endpoints require `X-API-Key: <API_KEY>` when `API_KEY` is set on the
-server. `/health` and `/api/registries` are open. The UI under `/ui/*` is intended
-to sit behind an authenticating reverse proxy (e.g. oauth-proxy on OpenShift).
+server. `/health` and `/api/registries` are open. The UI under `/` and `/ui/*` can
+either sit behind an authenticating reverse proxy (e.g. oauth-proxy on OpenShift)
+or use the built-in single-user HTTP Basic Auth (see `BASIC_AUTH_USER` /
+`BASIC_AUTH_PASS` below). When Basic Auth is enabled the browser shows a login
+prompt on the first visit.
 
 ### POST `/api/copy`
 
@@ -104,15 +107,66 @@ table below is the canonical source of truth.
 | `NEXUS_USER`            | no       | —       | Username for the destination registry.                            |
 | `NEXUS_PASS`            | no       | —       | Password / token for the destination registry. Inject via Secret. |
 | `API_KEY`               | no       | —       | If set, `/api/*` requires `X-API-Key: <value>`. Inject via Secret.|
+| `BASIC_AUTH_USER`       | no       | —       | If set, the UI (`/`, `/ui/*`) prompts for HTTP Basic Auth with this username. `/health` and `/api/*` are unaffected. |
+| `BASIC_AUTH_PASS`       | no       | —       | Password paired with `BASIC_AUTH_USER`. Inject via Secret.        |
 | `CORPORATE_PROXY`       | no       | —       | `http://host:port` proxy used for pulls. Pushes bypass it.        |
 | `NO_PROXY_EXTRA`        | no       | —       | Comma-separated extra hosts to add to `NO_PROXY`.                 |
 | `PORT`                  | no       | `8080`  | Listen port.                                                      |
 | `WORKERS`               | no       | `3`     | Number of worker threads.                                         |
-| `HISTORY_SIZE`          | no       | `500`   | Job history retained in memory.                                   |
+| `HISTORY_SIZE`          | no       | `500`   | Jobs retained in history.                                         |
 | `HEALTH_CHECK_INTERVAL` | no       | `30`    | Seconds between upstream-registry health probes.                  |
+| `DATA_DIR`              | no       | `/data` | Directory for the persisted job history. If it is not writable the app still runs, but history is lost on restart. |
+| `LOG_TAIL_CHARS`        | no       | `4000`  | Characters of skopeo output stored per job.                       |
 
-Secrets (`NEXUS_PASS`, `API_KEY`) should be supplied via a Kubernetes `Secret`
-that you create out of band. See `chart/values.yaml` for the references.
+Secrets (`NEXUS_PASS`, `API_KEY`, `BASIC_AUTH_USER`, `BASIC_AUTH_PASS`) should be
+supplied via a Kubernetes `Secret` that you create out of band. See
+`chart/values.yaml` for the references.
+
+## Job history
+
+Every job is written to `$DATA_DIR/history.jsonl` and reloaded on start, so a
+restart or redeploy no longer wipes it. Each record holds the source ref, the
+destination ref, the result, timestamps, the failure category, and the
+manifest digest skopeo actually pushed.
+
+Each job is written twice: once when it is queued, once when it finishes. On
+load the later record wins. Writing at queue time is deliberate - it is what
+makes a crash visible. A job that was still copying when the pod died comes
+back as `interrupted` rather than disappearing as though it never ran.
+
+The UI's **history** section supports free-text filtering across source,
+destination, state, failure category, digest and job id, one-click copy of
+the source ref, the destination ref and the digest-pinned ref, and re-running
+any finished job.
+
+### A re-run is not a reproduction
+
+Re-running a mirror of a mutable tag pulls whatever that tag points at *now*.
+That is why the digest is recorded: compare the new job's digest with the old
+one to see whether the bytes actually changed. `/api/jobs/<id>/rerun` returns
+`previousDigest` for exactly this.
+
+### Credentials are never persisted
+
+`src_user` and `src_token` are held in memory for the life of the process and
+are never written to `history.jsonl`. A re-run of a job restored from disk
+therefore goes out **unauthenticated**; the UI flags this on affected rows.
+Re-enter the credentials in the copy form if the source is private.
+
+Log tails are stored, which is safe: skopeo receives credentials in argv, so
+they never appear in its output.
+
+### Storage class
+
+The chart requires `persistence.storageClassName` to be set explicitly and
+fails the render if it is empty. An unset class binds to the cluster default,
+which is frequently an in-tree cloud provisioner requiring a detach before a
+pod can move nodes - and a detach that does not complete pins the pod
+indefinitely. Pick a class that does not need one (CephFS, NFS, or any RWX
+class).
+
+`strategy: Recreate` is set whenever persistence is on, so a rolling update
+never leaves two pods appending to the same file.
 
 ## Deploying with Helm
 
@@ -125,7 +179,9 @@ refuse to render if they are missing.
 ```bash
 kubectl create secret generic mirrorgate-secrets \
   --from-literal=NEXUS_PASS='<password>' \
-  --from-literal=API_KEY="$(openssl rand -hex 32)"
+  --from-literal=API_KEY="$(openssl rand -hex 32)" \
+  --from-literal=BASIC_AUTH_USER='admin' \
+  --from-literal=BASIC_AUTH_PASS='<browser-password>'
 ```
 
 ### 2. Install the chart
@@ -147,6 +203,11 @@ nexus:
 apiKeySecret:
   name: mirrorgate-secrets
   key: API_KEY
+
+basicAuthSecret:
+  name: mirrorgate-secrets
+  userKey: BASIC_AUTH_USER
+  passKey: BASIC_AUTH_PASS
 
 corporateProxy: "http://proxy.example.com:8080"
 ```

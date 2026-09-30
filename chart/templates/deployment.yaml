@@ -15,6 +15,14 @@ metadata:
     {{- include "mirrorgate.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.replicaCount }}
+  {{- if .Values.persistence.enabled }}
+  # Recreate, not RollingUpdate. With a rolling update the old and new pods
+  # overlap, and for that window both append to the same history.jsonl. One
+  # writer at a time is simpler than making the append safe across pods, and
+  # mirrorgate is a single-replica tool anyway.
+  strategy:
+    type: Recreate
+  {{- end }}
   selector:
     matchLabels:
       {{- include "mirrorgate.selectorLabels" . | nindent 6 }}
@@ -65,6 +73,18 @@ spec:
                   name: {{ .Values.apiKeySecret.name }}
                   key: {{ .Values.apiKeySecret.key }}
             {{- end }}
+            {{- if .Values.basicAuthSecret.name }}
+            - name: BASIC_AUTH_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.basicAuthSecret.name }}
+                  key: {{ .Values.basicAuthSecret.userKey }}
+            - name: BASIC_AUTH_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.basicAuthSecret.name }}
+                  key: {{ .Values.basicAuthSecret.passKey }}
+            {{- end }}
             {{- if .Values.corporateProxy }}
             - name: CORPORATE_PROXY
               value: {{ .Values.corporateProxy | quote }}
@@ -81,9 +101,20 @@ spec:
               value: {{ .Values.config.historySize | quote }}
             - name: HEALTH_CHECK_INTERVAL
               value: {{ .Values.config.healthCheckInterval | quote }}
+            - name: LOG_TAIL_CHARS
+              value: {{ .Values.config.logTailChars | quote }}
+            {{- if .Values.persistence.enabled }}
+            - name: DATA_DIR
+              value: {{ .Values.persistence.mountPath | quote }}
+            {{- end }}
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
+          {{- if .Values.persistence.enabled }}
+          volumeMounts:
+            - name: data
+              mountPath: {{ .Values.persistence.mountPath }}
+          {{- end }}
           livenessProbe:
             httpGet:
               path: /health
@@ -102,6 +133,12 @@ spec:
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
+      {{- if .Values.persistence.enabled }}
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ .Values.persistence.existingClaim | default (printf "%s-data" (include "mirrorgate.fullname" .)) }}
+      {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

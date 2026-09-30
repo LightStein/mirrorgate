@@ -5,8 +5,9 @@
 # either optional or expected to come from an out-of-band Kubernetes Secret.
 # -----------------------------------------------------------------------------
 
-# Number of replicas. Mirrorgate keeps job state in-memory, so >1 replicas split
-# the job queue across pods. Stick with 1 unless you understand that trade-off.
+# Number of replicas. Mirrorgate keeps the live job queue in-memory and appends
+# history to a single file on the data volume, so >1 replicas both split the
+# queue and interleave writes to that file. Keep this at 1.
 replicaCount: 1
 
 image:
@@ -42,6 +43,23 @@ apiKeySecret:
   key: API_KEY
 
 # -----------------------------------------------------------------------------
+# Browser authentication (optional)
+# -----------------------------------------------------------------------------
+# If basicAuthSecret.name is set, the UI ("/" and "/ui/*") prompts for HTTP
+# Basic Auth with a single user/password pulled from the named Secret.
+# /health and /api/* are NOT gated by Basic Auth (kubelet probes + CI use
+# X-API-Key). If left empty, the UI is open.
+#
+# Create the Secret out of band, e.g.:
+#   kubectl create secret generic mirrorgate-secrets \
+#     --from-literal=BASIC_AUTH_USER='admin' \
+#     --from-literal=BASIC_AUTH_PASS='...'
+basicAuthSecret:
+  name: ""                # e.g. mirrorgate-secrets
+  userKey: BASIC_AUTH_USER
+  passKey: BASIC_AUTH_PASS
+
+# -----------------------------------------------------------------------------
 # Outbound proxy (optional)
 # -----------------------------------------------------------------------------
 # Set this if pulls to public registries have to traverse a corporate proxy.
@@ -57,8 +75,38 @@ noProxyExtra: ""          # e.g. .internal,.local
 config:
   port: 8080
   workers: 3
+  # Jobs kept in history. Two lines are appended per job and the file is
+  # compacted at 4x this, so a 500-job history settles around 1-2MB.
   historySize: 500
   healthCheckInterval: 30
+  # Characters of skopeo output stored per job. Credentials are passed to
+  # skopeo in argv and never appear in its output, so the tail holds no secret.
+  logTailChars: 4000
+
+# -----------------------------------------------------------------------------
+# Job history storage
+# -----------------------------------------------------------------------------
+# Mirrorgate writes job history (source, destination, result, timestamps and
+# the pushed manifest digest) to DATA_DIR as JSONL and reloads it on start.
+#
+# With persistence disabled the app still runs, but every restart wipes the
+# history - which is what it did before v3.3.0.
+persistence:
+  enabled: true
+  # ALWAYS set this explicitly. Leaving it unset binds to the cluster default
+  # storage class, and on the ANB clusters that is `thin`, the in-tree vSphere
+  # provisioner - the same setup behind the nine-day stuck detach in July 2026,
+  # where vCenter would not release the volume and the pod could not reschedule.
+  # CephFS needs no detach at all.
+  storageClassName: ocs-storagecluster-cephfs
+  # RWX so the volume never has to be detached from a node to move the pod.
+  # replicaCount stays 1 regardless - this is about rescheduling, not scale.
+  accessMode: ReadWriteMany
+  size: 2Gi
+  mountPath: /data
+  # Bind an existing claim instead of creating one. Use this when migrating
+  # from a volume that already holds history.jsonl.
+  existingClaim: ""
 
 # -----------------------------------------------------------------------------
 # Kubernetes / OpenShift wiring

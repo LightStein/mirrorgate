@@ -1,25 +1,30 @@
 #!/usr/bin/env python3
 """
-Mirrorgate v3.1.0
+Mirrorgate
 Async queue + UI + CI API for mirroring container images
 through the corporate proxy into Nexus.
 
 Architecture:
   - skopeo copy (no daemon, runs under restricted SCC)
   - In-memory queue, N worker threads, single-flight per dest:tag
+  - Job history persisted to a volume as JSONL, reloaded on start
   - JSON API at /api/* (X-API-Key auth) for CI pipelines
   - htmx UI at /ui/* (OAuth proxy in front in OCP) for humans
 """
-VERSION = '3.1.3'
+VERSION = '3.3.0'
 import os
 import re
+import hmac
 import json
 import time
 import uuid
 import queue
+import shutil
+import tempfile
 import threading
 import subprocess
 from collections import deque
+from pathlib import Path
 from datetime import datetime, timezone
 from functools import wraps
 
@@ -34,10 +39,21 @@ NEXUS_USER = os.environ.get('NEXUS_USER', '').strip()
 NEXUS_PASS = os.environ.get('NEXUS_PASS', '')
 CORPORATE_PROXY = os.environ.get('CORPORATE_PROXY', '').strip()
 API_KEY = os.environ.get('API_KEY', '')
+BASIC_AUTH_USER = os.environ.get('BASIC_AUTH_USER', '').strip()
+BASIC_AUTH_PASS = os.environ.get('BASIC_AUTH_PASS', '')
 PORT = int(os.environ.get('PORT', '8080'))
 WORKERS = int(os.environ.get('WORKERS', '3'))
 HISTORY_SIZE = int(os.environ.get('HISTORY_SIZE', '500'))
 HEALTH_CHECK_INTERVAL = int(os.environ.get('HEALTH_CHECK_INTERVAL', '30'))
+
+# Job history lives on a volume so it survives a restart. Before v3.3.0 the
+# store was a deque in RAM and every redeploy wiped it.
+#
+# If DATA_DIR is not writable the app still runs - history just stays
+# in-memory, and /health reports persistence as off. Losing history is
+# annoying; refusing to mirror images because a volume is missing is worse.
+DATA_DIR = Path(os.environ.get('DATA_DIR', '/data'))
+LOG_TAIL_CHARS = int(os.environ.get('LOG_TAIL_CHARS', '4000'))
 
 if not NEXUS_REGISTRY:
     raise SystemExit(
@@ -128,6 +144,12 @@ class Job:
         self.log = ''
         self.error_category = None
         self.error_hint = None
+        self.digest = None
+        # Recorded, not stored. The token itself never reaches disk, so a
+        # re-run from history is unauthenticated - the UI has to say so rather
+        # than fail with a confusing 401.
+        self.had_creds = bool(self._src_user and self._src_token)
+        self.restored = False
         self.cancel_event = threading.Event()
         self.proc = None
 
@@ -159,7 +181,172 @@ class Job:
             'finished_at': self.finished_at,
             'error_category': self.error_category,
             'error_hint': self.error_hint,
+            'digest': self.digest,
+            'had_creds': self.had_creds,
+            'restored': self.restored,
         }
+
+    # -- persistence round-trip -------------------------------------------
+    #
+    # Deliberately excludes src_user and src_token. Everything else is safe to
+    # keep: skopeo puts credentials in argv, never in its output, so a log tail
+    # carries no secret.
+
+    def to_record(self):
+        d = self.to_dict()
+        d['log_tail'] = (self.log or '')[-LOG_TAIL_CHARS:]
+        return d
+
+    @classmethod
+    def from_record(cls, d):
+        job = cls.__new__(cls)
+        job.id = d['id']
+        job.created_at = d.get('created_at')
+        job.started_at = d.get('started_at')
+        job.finished_at = d.get('finished_at')
+        job.state = d.get('state', 'unknown')
+        job.src_registry = d.get('src_registry', '')
+        job.src_image = d.get('src_image', '')
+        job.src_tag = d.get('src_tag', '')
+        job.dest_image = d.get('dest_image', '')
+        job.dest_tag = d.get('dest_tag', '')
+        job._src_user = ''
+        job._src_token = ''
+        job.log = d.get('log_tail', '')
+        job.error_category = d.get('error_category')
+        job.error_hint = d.get('error_hint')
+        job.digest = d.get('digest')
+        job.had_creds = bool(d.get('had_creds'))
+        job.restored = True
+        job.cancel_event = threading.Event()
+        job.proc = None
+        # A job still queued or copying when the process died did not finish.
+        # Saying so is more honest than leaving it looking permanently active.
+        if job.state in ('queued', 'pulling', 'pushing'):
+            job.state = 'interrupted'
+            job.error_category = job.error_category or 'Interrupted'
+            job.error_hint = job.error_hint or (
+                'mirrorgate restarted while this job was running. '
+                'It did not complete - re-run it to be sure.'
+            )
+        return job
+
+
+class HistoryLog:
+    """Append-only job history on the data volume.
+
+    One JSON object per line. Each job is written twice - once when queued and
+    once when it reaches a terminal state - and on load the later record for an
+    id wins. Writing at queue time is what makes a pod crash visible: the job
+    comes back as 'interrupted' instead of vanishing as though it never ran.
+
+    Append-only rather than rewrite-the-world because a partial write then
+    costs one malformed line, which load() skips, instead of the whole file.
+
+    Disabled cleanly when the volume is missing: every method becomes a no-op
+    and `enabled` is False, so the app runs exactly as it did before v3.3.0.
+    """
+
+    def __init__(self, path, max_records):
+        self.path = Path(path)
+        self.max_records = max_records
+        self.enabled = False
+        self.reason = 'not initialised'
+        self._lock = threading.Lock()
+        self._lines = 0
+
+    def init(self):
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self.path.touch(exist_ok=True)
+            # Prove it is writable now rather than discovering it on the first
+            # job, when the user is watching.
+            with self.path.open('a', encoding='utf-8'):
+                pass
+            self._lines = sum(1 for _ in self.path.open('r', encoding='utf-8'))
+            self.enabled = True
+            self.reason = 'ok'
+        except OSError as e:
+            self.enabled = False
+            self.reason = f'{type(e).__name__}: {e}'
+        return self.enabled
+
+    def append(self, record):
+        if not self.enabled:
+            return
+        line = json.dumps(record, separators=(',', ':'), default=str)
+        try:
+            with self._lock:
+                with self.path.open('a', encoding='utf-8') as f:
+                    f.write(line + '\n')
+                    f.flush()
+                    os.fsync(f.fileno())
+                self._lines += 1
+                # Two records per job, so 2x max_records is roughly one full
+                # history. Compact at 4x to keep rewrites rare.
+                if self._lines > self.max_records * 4:
+                    self._compact_locked()
+        except OSError as e:
+            # Never let a history write break a mirror.
+            print(f"[history] append failed: {e}", flush=True)
+
+    def _compact_locked(self):
+        records = self._read_merged()
+        keep = records[-self.max_records:]
+        tmp = None
+        try:
+            fd, tmp = tempfile.mkstemp(dir=str(self.path.parent), prefix='.history-')
+            with os.fdopen(fd, 'w', encoding='utf-8') as f:
+                for r in keep:
+                    f.write(json.dumps(r, separators=(',', ':'), default=str) + '\n')
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, self.path)
+            tmp = None
+            self._lines = len(keep)
+            print(f"[history] compacted to {len(keep)} records", flush=True)
+        except OSError as e:
+            print(f"[history] compaction failed: {e}", flush=True)
+        finally:
+            if tmp and os.path.exists(tmp):
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+
+    def _read_merged(self):
+        """Latest record per job id, oldest first. Malformed lines are skipped
+        rather than fatal - a torn line from a hard kill should cost one job's
+        history, not the file."""
+        merged = {}
+        bad = 0
+        try:
+            with self.path.open('r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except ValueError:
+                        bad += 1
+                        continue
+                    if isinstance(rec, dict) and rec.get('id'):
+                        merged[rec['id']] = rec
+        except OSError as e:
+            print(f"[history] read failed: {e}", flush=True)
+            return []
+        if bad:
+            print(f"[history] skipped {bad} malformed line(s)", flush=True)
+        return sorted(merged.values(), key=lambda r: r.get('created_at') or '')
+
+    def load(self):
+        if not self.enabled:
+            return []
+        return self._read_merged()[-self.max_records:]
+
+
+history_log = HistoryLog(DATA_DIR / 'history.jsonl', HISTORY_SIZE)
 
 
 class JobStore:
@@ -170,7 +357,7 @@ class JobStore:
         self._inflight_dest = set()
         self._inflight_lock = threading.Lock()
 
-    def add(self, job):
+    def add(self, job, persist=True):
         with self._lock:
             if len(self._order) == self._order.maxlen and self._order:
                 # deque pops left automatically; clean dict
@@ -178,6 +365,37 @@ class JobStore:
                 self._jobs.pop(evicted, None)
             self._jobs[job.id] = job
             self._order.append(job.id)
+        if persist:
+            history_log.append(job.to_record())
+
+    def persist(self, job):
+        """Write the job's current state. Called when a job finishes, so the
+        terminal record supersedes the one written at queue time."""
+        history_log.append(job.to_record())
+
+    def restore(self):
+        records = history_log.load()
+        for rec in records:
+            try:
+                self.add(Job.from_record(rec), persist=False)
+            except Exception as e:
+                print(f"[history] could not restore {rec.get('id')}: {e}", flush=True)
+        return len(records)
+
+    def search(self, q='', limit=None):
+        """Substring match across the fields a person would actually type:
+        source ref, destination ref, state, failure category, digest, job id."""
+        jobs = list(reversed(self.list(limit=self._order.maxlen)))
+        q = (q or '').strip().lower()
+        if q:
+            def hit(j):
+                haystack = ' '.join(filter(None, (
+                    j.src_str, j.dest_str, j.state, j.error_category,
+                    j.digest, j.id,
+                ))).lower()
+                return all(term in haystack for term in q.split())
+            jobs = [j for j in jobs if hit(j)]
+        return jobs[:limit] if limit else jobs
 
     def get(self, job_id):
         return self._jobs.get(job_id)
@@ -221,11 +439,18 @@ def run_copy(job):
     src = f"docker://{job.src_registry}/{job.src_image}:{job.src_tag}"
     dst = f"docker://{NEXUS_REGISTRY}/{job.dest_image}:{job.dest_tag}"
 
+    # skopeo writes the manifest digest it pushed to this file. Recording it
+    # is what makes a re-run from history checkable: a tag is mutable, so the
+    # only way to know whether a re-run moved the bytes is to compare digests.
+    digest_dir = tempfile.mkdtemp(prefix='mirrorgate-digest-')
+    digest_path = os.path.join(digest_dir, 'digest')
+
     cmd = [
         'skopeo', 'copy',
         '--retry-times=2',
         '--multi-arch=all',
         '--dest-tls-verify=false',
+        f'--digestfile={digest_path}',
     ]
     if job._src_user and job._src_token:
         cmd.append(f'--src-creds={job._src_user}:{job._src_token}')
@@ -256,6 +481,13 @@ def run_copy(job):
     proc.stdout.close()
     rc = proc.wait()
     job.log = ''.join(out_lines)
+
+    try:
+        with open(digest_path, 'r', encoding='utf-8') as f:
+            job.digest = f.read().strip() or None
+    except OSError:
+        job.digest = None
+    shutil.rmtree(digest_dir, ignore_errors=True)
 
     if job.cancel_event.is_set():
         job.state = 'cancelled'
@@ -302,6 +534,12 @@ def worker_loop():
             job.error_hint = 'Internal runner error. See raw log.'
             job.finished_at = now_iso()
         finally:
+            # One persist per job regardless of how it ended - done, failed,
+            # cancelled, conflict, or runner crash all land here.
+            try:
+                store.persist(job)
+            except Exception as e:
+                print(f"[history] persist failed for {job.id}: {e}", flush=True)
             work_queue.task_done()
 
 
@@ -377,6 +615,27 @@ def require_api_key(fn):
     return wrapper
 
 
+@app.before_request
+def _gate_browser_with_basic_auth():
+    # /health stays open for kubelet probes. /api/* uses X-API-Key (CI doesn't
+    # send Basic creds). Everything else is browser traffic — gate it.
+    if not BASIC_AUTH_USER:
+        return None
+    path = request.path or ''
+    if path == '/health' or path.startswith('/api/'):
+        return None
+    auth = request.authorization
+    if auth and auth.username and auth.password \
+            and hmac.compare_digest(auth.username, BASIC_AUTH_USER) \
+            and hmac.compare_digest(auth.password, BASIC_AUTH_PASS):
+        return None
+    return Response(
+        'Authentication required.\n',
+        status=401,
+        headers={'WWW-Authenticate': 'Basic realm="mirrorgate", charset="UTF-8"'},
+    )
+
+
 def parse_src_ref(s):
     """Parse a full source reference. Accepts:
         registry/path/image:tag
@@ -448,11 +707,45 @@ def parse_copy_payload(data):
     }, None
 
 
+RETRYABLE = ('failed', 'cancelled', 'interrupted')
+TERMINAL = ('done', 'failed', 'cancelled', 'interrupted')
+
+
+def requeue_from(job):
+    """Queue a fresh copy with the same source and destination.
+
+    Credentials are not carried across a restart - they were never written to
+    disk - so a re-run of a restored job goes out unauthenticated. For a job
+    still in this process's memory the creds are reused.
+    """
+    new_job = Job({
+        'src_registry': job.src_registry,
+        'src_image': job.src_image,
+        'src_tag': job.src_tag,
+        'src_user': job._src_user,
+        'src_token': job._src_token,
+        'dest_image': job.dest_image,
+        'dest_tag': job.dest_tag,
+    })
+    store.add(new_job)
+    work_queue.put(new_job)
+    return new_job
+
+
 # ----- Health (no auth) -----
 
 @app.get('/health')
 def http_health():
-    return jsonify({'status': 'healthy', 'version': VERSION, 'workers': WORKERS})
+    return jsonify({
+        'status': 'healthy',
+        'version': VERSION,
+        'workers': WORKERS,
+        'persistence': {
+            'enabled': history_log.enabled,
+            'path': str(history_log.path),
+            'detail': history_log.reason,
+        },
+    })
 
 
 @app.get('/')
@@ -521,21 +814,43 @@ def api_job_retry(job_id):
     j = store.get(job_id)
     if not j:
         return jsonify({'error': 'not found'}), 404
-    if j.state not in ('failed', 'cancelled'):
+    if j.state not in RETRYABLE:
         return jsonify({'error': f'cannot retry a {j.state} job'}), 409
-    new_payload = {
-        'src_registry': j.src_registry,
-        'src_image': j.src_image,
-        'src_tag': j.src_tag,
-        'src_user': j._src_user,
-        'src_token': j._src_token,
-        'dest_image': j.dest_image,
-        'dest_tag': j.dest_tag,
-    }
-    new_job = Job(new_payload)
-    store.add(new_job)
-    work_queue.put(new_job)
+    new_job = requeue_from(j)
     return jsonify({'jobId': new_job.id, 'state': new_job.state}), 202
+
+
+@app.post('/api/jobs/<job_id>/rerun')
+@require_api_key
+def api_job_rerun(job_id):
+    """Re-run any finished job, including a successful one.
+
+    Distinct from retry on purpose: retry is for something that went wrong,
+    re-run is "do that same mirror again". Tags are mutable, so this may well
+    move different bytes than the original - compare the digests.
+    """
+    j = store.get(job_id)
+    if not j:
+        return jsonify({'error': 'not found'}), 404
+    if j.state not in TERMINAL:
+        return jsonify({'error': f'job is still {j.state}'}), 409
+    new_job = requeue_from(j)
+    return jsonify({
+        'jobId': new_job.id,
+        'state': new_job.state,
+        'src': new_job.src_str,
+        'dest': new_job.dest_str,
+        'previousDigest': j.digest,
+        'authenticated': bool(new_job._src_token),
+    }), 202
+
+
+@app.get('/api/history')
+@require_api_key
+def api_history():
+    q = request.args.get('q', '')
+    limit = min(int(request.args.get('limit', '200')), HISTORY_SIZE)
+    return jsonify([j.to_dict() for j in store.search(q, limit=limit)])
 
 
 @app.get('/api/registries')
@@ -554,6 +869,9 @@ def ui_index():
         registry_names=[r['name'] for r in REGISTRIES],
         nexus=NEXUS_REGISTRY,
         jobs=list(reversed(store.list(limit=100))),
+        history=store.search('', limit=200),
+        history_q='',
+        persistence=history_log,
         version=VERSION,
     )
 
@@ -584,19 +902,8 @@ def ui_cancel(job_id):
 @app.post('/ui/jobs/<job_id>/retry')
 def ui_retry(job_id):
     j = store.get(job_id)
-    if j and j.state in ('failed', 'cancelled'):
-        new_payload = {
-            'src_registry': j.src_registry,
-            'src_image': j.src_image,
-            'src_tag': j.src_tag,
-            'src_user': j._src_user,
-            'src_token': j._src_token,
-            'dest_image': j.dest_image,
-            'dest_tag': j.dest_tag,
-        }
-        new_job = Job(new_payload)
-        store.add(new_job)
-        work_queue.put(new_job)
+    if j and j.state in RETRYABLE:
+        requeue_from(j)
     return render_template('_board.html', jobs=list(reversed(store.list(limit=100))))
 
 
@@ -613,6 +920,31 @@ def ui_copy():
     err_html = render_template('_form_error.html', error=err)
     board_html = render_template('_board.html', jobs=list(reversed(store.list(limit=100))))
     return err_html + board_html
+
+
+@app.get('/ui/history')
+def ui_history():
+    q = request.args.get('q', '')
+    return render_template(
+        '_history.html',
+        history=store.search(q, limit=200),
+        history_q=q,
+        persistence=history_log,
+    )
+
+
+@app.post('/ui/jobs/<job_id>/rerun')
+def ui_rerun(job_id):
+    q = request.args.get('q', '')
+    j = store.get(job_id)
+    if j and j.state in TERMINAL:
+        requeue_from(j)
+    return render_template(
+        '_history.html',
+        history=store.search(q, limit=200),
+        history_q=q,
+        persistence=history_log,
+    )
 
 
 @app.get('/ui/jobs/<job_id>/log')
@@ -633,8 +965,18 @@ def ui_drawer_close():
 # =============================================================================
 
 def main():
+    if history_log.init():
+        restored = store.restore()
+        print(f"Mirrorgate :: history at {history_log.path}, "
+              f"{restored} job(s) restored", flush=True)
+    else:
+        print(f"Mirrorgate :: history DISABLED ({history_log.reason}). "
+              f"Jobs will be lost on restart - mount a volume at {DATA_DIR} "
+              f"or set DATA_DIR.", flush=True)
+
     print(f"Mirrorgate v{VERSION} :: nexus={NEXUS_REGISTRY} proxy={CORPORATE_PROXY} "
-          f"workers={WORKERS} api_key={'on' if API_KEY else 'off'}", flush=True)
+          f"workers={WORKERS} api_key={'on' if API_KEY else 'off'} "
+          f"basic_auth={'on' if BASIC_AUTH_USER else 'off'}", flush=True)
     for _ in range(WORKERS):
         threading.Thread(target=worker_loop, daemon=True).start()
     threading.Thread(target=health.check_loop, daemon=True).start()

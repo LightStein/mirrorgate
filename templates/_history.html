@@ -1,0 +1,127 @@
+{#
+  Persisted job history with search, copy-to-clipboard and re-run.
+
+  Swapped whole via htmx (outerHTML on #history), so the search box has to
+  live inside this partial - otherwise a swap would blow away what the user
+  had typed. hx-include is not needed: htmx sends a named input's own value.
+#}
+<div id="history" class="hist-wrap">
+
+  {% if not persistence.enabled %}
+    <div class="hist-warn">
+      history is <b>not being saved</b> ({{ persistence.reason }}) &mdash;
+      these rows are in memory only and will be lost on restart.
+      Mount a volume at <code>{{ persistence.path.parent }}</code>.
+    </div>
+  {% endif %}
+
+  <div class="hist-controls">
+    <input class="hist-search"
+           type="search"
+           name="q"
+           value="{{ history_q }}"
+           placeholder="filter: image, tag, state, failure, digest, job id"
+           hx-get="/ui/history"
+           hx-trigger="keyup changed delay:250ms, search"
+           hx-target="#history"
+           hx-swap="outerHTML">
+    <span class="hist-count">{{ history|length }} shown</span>
+    <button class="btn-mini"
+            hx-get="/ui/history"
+            hx-target="#history"
+            hx-swap="outerHTML"
+            title="reload history">reload</button>
+  </div>
+
+  <div class="hist">
+    <div class="row head">
+      <span>state</span>
+      <span>source</span>
+      <span>destination</span>
+      <span>digest</span>
+      <span>finished</span>
+      <span>actions</span>
+    </div>
+
+    {% if not history %}
+      <div class="empty">
+        {% if history_q %}&mdash; nothing matches "{{ history_q }}" &mdash;
+        {% else %}&mdash; no history yet &mdash;{% endif %}
+      </div>
+    {% endif %}
+
+    {% for j in history %}
+      <div class="row">
+        <span class="state {{ j.state }}">{{ j.state }}</span>
+
+        <span class="src" title="{{ j.src_str }}">
+          <span class="reg-prefix">{{ j.src_registry }}/</span>{{ j.src_image }}:{{ j.src_tag }}
+        </span>
+
+        <span class="dest" title="{{ j.dest_str }}">{{ j.dest_image }}:{{ j.dest_tag }}</span>
+
+        <span class="digest">
+          {% if j.digest %}
+            <code title="{{ j.digest }}">{{ j.digest[7:19] }}</code>
+          {% else %}
+            <span style="color: var(--dim)">&mdash;</span>
+          {% endif %}
+        </span>
+
+        <span class="age">
+          {% if j.finished_at %}{{ j.finished_at[11:19] }}Z{% else %}&mdash;{% endif %}
+        </span>
+
+        <span class="actions">
+          {# Two separate copies: the full source line is what you paste back
+             into the form, the destination ref is what you paste into a
+             values.yaml or a deployment. #}
+          <button class="btn-mini"
+                  type="button"
+                  data-copy="{{ j.src_str }}"
+                  onclick="mgCopy(this)"
+                  title="copy source: {{ j.src_str }}">copy src</button>
+          <button class="btn-mini"
+                  type="button"
+                  data-copy="{{ j.dest_str }}"
+                  onclick="mgCopy(this)"
+                  title="copy destination: {{ j.dest_str }}">copy dest</button>
+          {% if j.digest %}
+            <button class="btn-mini"
+                    type="button"
+                    data-copy="{{ j.dest_image }}@{{ j.digest }}"
+                    onclick="mgCopy(this)"
+                    title="copy digest-pinned ref: {{ j.dest_image }}@{{ j.digest }}">copy @sha</button>
+          {% endif %}
+          <button class="btn-mini"
+                  hx-post="/ui/jobs/{{ j.id }}/rerun?q={{ history_q|urlencode }}"
+                  hx-target="#history"
+                  hx-swap="outerHTML"
+                  title="queue this same copy again">re-run</button>
+          <button class="btn-mini"
+                  hx-get="/ui/jobs/{{ j.id }}/log"
+                  hx-target="#drawer"
+                  hx-swap="innerHTML"
+                  title="view stored log tail">log</button>
+        </span>
+      </div>
+
+      {% if j.restored and j.had_creds %}
+        <div class="row err-row">
+          <div class="err-inline">
+            <b>note:</b> the original run used source credentials. Tokens are
+            never written to disk, so a re-run from history goes out
+            unauthenticated &mdash; re-enter them in the copy form if the source
+            is private.
+          </div>
+        </div>
+      {% endif %}
+
+      {% if j.error_hint %}
+        <div class="row err-row">
+          <div class="err-inline"><b>{{ j.error_category }}:</b> {{ j.error_hint }}</div>
+        </div>
+      {% endif %}
+    {% endfor %}
+  </div>
+</div>

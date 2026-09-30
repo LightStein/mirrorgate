@@ -18,8 +18,15 @@ COPY app.py .
 COPY templates/ ./templates/
 
 # OCP/PSS runs containers with a random UID and GID 0. Make /app group-0 readable
-# so the random UID can exec the app. Don't set USER — OCP overrides it.
-RUN chgrp -R 0 /app && chmod -R g=u /app
+# so the random UID can exec the app. Don't set USER - OCP overrides it.
+#
+# /data is the history volume's mount point. Created group-0 writable here so
+# the app can write even when no volume is mounted (history then lives in the
+# container and dies with it, which is the documented degraded mode rather
+# than a crash). A mounted PVC replaces this directory and carries the
+# fsGroup the platform assigns.
+RUN chgrp -R 0 /app && chmod -R g=u /app \
+ && mkdir -p /data && chgrp 0 /data && chmod g=u /data
 
 EXPOSE 8080
 
@@ -28,6 +35,8 @@ EXPOSE 8080
 ENV PORT=8080 \
     WORKERS=3 \
     HISTORY_SIZE=500 \
-    HEALTH_CHECK_INTERVAL=30
+    HEALTH_CHECK_INTERVAL=30 \
+    DATA_DIR=/data \
+    LOG_TAIL_CHARS=4000
 
 CMD ["python", "-u", "app.py"]

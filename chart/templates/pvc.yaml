@@ -1,0 +1,30 @@
+{{/*
+Job history volume.
+
+Only rendered when persistence is on and no existingClaim is supplied, so a
+migration can point at a claim that already holds history.jsonl without this
+chart trying to own it.
+
+storageClassName is required rather than defaulted. An unset class binds to
+whatever the cluster default happens to be, and on the ANB clusters that is
+`thin` - the in-tree vSphere provisioner behind the July 2026 stuck detach.
+Failing the render is better than silently landing there.
+*/}}
+{{- if and .Values.persistence.enabled (not .Values.persistence.existingClaim) }}
+{{- if not .Values.persistence.storageClassName }}
+{{- fail "persistence.storageClassName is required. Set it explicitly (ANB: ocs-storagecluster-cephfs); do not rely on the cluster default, which is the in-tree vSphere `thin` class." }}
+{{- end }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "mirrorgate.fullname" . }}-data
+  labels:
+    {{- include "mirrorgate.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    - {{ .Values.persistence.accessMode }}
+  storageClassName: {{ .Values.persistence.storageClassName | quote }}
+  resources:
+    requests:
+      storage: {{ .Values.persistence.size }}
+{{- end }}

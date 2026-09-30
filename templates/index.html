@@ -162,6 +162,37 @@
     .state.done     { color: var(--green); }
     .state.failed   { color: var(--red); }
     .state.cancelled{ color: var(--muted); }
+    .state.interrupted { color: var(--yellow, #d7af5f); }
+
+    /* History reuses .row, but needs its own column widths: the actions cell
+       carries four buttons instead of two. */
+    .hist {
+      border: 1px solid var(--border);
+      background: var(--panel);
+      font-size: 13px;
+    }
+    .hist .row {
+      grid-template-columns: 80px 1fr 1fr 110px 80px 290px;
+    }
+    .hist .row.err-row { grid-template-columns: 1fr !important; }
+    .hist .digest code {
+      color: var(--muted); font-size: 11px;
+    }
+    .hist-controls {
+      display: flex; align-items: center; gap: 10px; margin-bottom: 6px;
+    }
+    .hist-search {
+      flex: 1 1 auto; max-width: 520px;
+    }
+    .hist-count {
+      color: var(--dim); font-size: 11px; white-space: nowrap;
+    }
+    .hist-warn {
+      border: 1px solid var(--red);
+      color: var(--red);
+      padding: 6px 10px; margin-bottom: 8px; font-size: 12px;
+    }
+    .btn-mini.copied { color: var(--green); border-color: var(--green); }
 
     .age { color: var(--muted); font-size: 12px; }
     .cat-failed { color: var(--red); font-weight: 600; }
@@ -349,6 +380,11 @@
     </section>
 
     <section>
+      <div class="rule"><span class="label">──[ <b>history</b> ]</span></div>
+      {% include '_history.html' %}
+    </section>
+
+    <section>
       <div class="rule"><span class="label">──[ <b>api</b> ]</span></div>
       <div class="api">
 
@@ -418,6 +454,40 @@
   <div id="drawer"></div>
 
   <script>
+    // navigator.clipboard only exists in a secure context. Behind the OCP
+    // Route that is HTTPS and it works, but on a plain-HTTP port-forward it is
+    // undefined - so fall back to the textarea trick rather than failing
+    // silently, which is the usual way copy buttons break.
+    function mgCopy(btn) {
+      var text = btn.getAttribute('data-copy') || '';
+      function ok() {
+        var prev = btn.textContent;
+        btn.textContent = 'copied';
+        btn.classList.add('copied');
+        setTimeout(function () {
+          btn.textContent = prev;
+          btn.classList.remove('copied');
+        }, 1200);
+      }
+      function legacy() {
+        var ta = document.createElement('textarea');
+        ta.value = text;
+        ta.setAttribute('readonly', '');
+        ta.style.position = 'fixed';
+        ta.style.top = '-1000px';
+        document.body.appendChild(ta);
+        ta.select();
+        try { document.execCommand('copy'); ok(); }
+        catch (e) { window.prompt('Copy manually:', text); }
+        document.body.removeChild(ta);
+      }
+      if (navigator.clipboard && window.isSecureContext) {
+        navigator.clipboard.writeText(text).then(ok, legacy);
+      } else {
+        legacy();
+      }
+    }
+
     document.addEventListener('keydown', function(e) {
       if (e.key === 'Escape') {
         var d = document.getElementById('drawer');

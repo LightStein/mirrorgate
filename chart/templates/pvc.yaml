@@ -6,13 +6,14 @@ migration can point at a claim that already holds history.jsonl without this
 chart trying to own it.
 
 storageClassName is required rather than defaulted. An unset class binds to
-whatever the cluster default happens to be, and on the ANB clusters that is
-`thin` - the in-tree vSphere provisioner behind the July 2026 stuck detach.
-Failing the render is better than silently landing there.
+whatever the cluster default happens to be, and that is frequently an in-tree
+cloud provisioner that must detach the volume before a pod can move nodes -
+a detach that hangs pins the pod indefinitely. Failing the render is better
+than silently landing there.
 */}}
 {{- if and .Values.persistence.enabled (not .Values.persistence.existingClaim) }}
 {{- if not .Values.persistence.storageClassName }}
-{{- fail "persistence.storageClassName is required. Set it explicitly (ANB: ocs-storagecluster-cephfs); do not rely on the cluster default, which is the in-tree vSphere `thin` class." }}
+{{- fail "persistence.storageClassName is required. Set it explicitly - do not rely on the cluster default, which is often an in-tree provisioner that needs a volume detach to reschedule a pod. Use a class with no detach (e.g. CephFS or another RWX class), or set persistence.enabled=false to run without history." }}
 {{- end }}
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -20,6 +21,12 @@ metadata:
   name: {{ include "mirrorgate.fullname" . }}-data
   labels:
     {{- include "mirrorgate.labels" . | nindent 4 }}
+  annotations:
+    # Keep the volume when ArgoCD prunes or the release is uninstalled. The
+    # whole point of this claim is that history outlives the pod; pruning it
+    # on a sync would defeat that silently.
+    argocd.argoproj.io/sync-options: Prune=false
+    helm.sh/resource-policy: keep
 spec:
   accessModes:
     - {{ .Values.persistence.accessMode }}

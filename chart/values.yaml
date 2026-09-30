@@ -93,14 +93,19 @@ config:
 # history - which is what it did before v3.3.0.
 persistence:
   enabled: true
-  # ALWAYS set this explicitly. Leaving it unset binds to the cluster default
-  # storage class, and on the ANB clusters that is `thin`, the in-tree vSphere
-  # provisioner - the same setup behind the nine-day stuck detach in July 2026,
-  # where vCenter would not release the volume and the pod could not reschedule.
-  # CephFS needs no detach at all.
-  storageClassName: ocs-storagecluster-cephfs
+  # Required - the render fails if this is empty, on purpose.
+  #
+  # An unset class binds to whatever the cluster default happens to be, and
+  # that is frequently an in-tree cloud provisioner that has to detach the
+  # volume before a pod can move nodes. A detach that does not complete pins
+  # the pod indefinitely. Pick a class that needs no detach: CephFS, NFS, or
+  # any RWX class.
+  #
+  # e.g. ocs-storagecluster-cephfs on OpenShift Data Foundation
+  storageClassName: ""
   # RWX so the volume never has to be detached from a node to move the pod.
   # replicaCount stays 1 regardless - this is about rescheduling, not scale.
+  # Drop to ReadWriteOnce only if the chosen class has no RWX mode.
   accessMode: ReadWriteMany
   size: 2Gi
   mountPath: /data

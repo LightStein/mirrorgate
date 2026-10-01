@@ -2,8 +2,8 @@ apiVersion: v2
 name: mirrorgate
 description: Mirror container images from public registries into a private destination registry.
 type: application
-version: 0.2.0
-appVersion: "3.3.0"
+version: 0.2.1
+appVersion: "3.4.0"
 home: https://github.com/LightStein/mirrorgate
 sources:
   - https://github.com/LightStein/mirrorgate

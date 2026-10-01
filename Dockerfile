@@ -16,6 +16,9 @@ RUN pip install --no-cache-dir --timeout 120 -r requirements.txt
 
 COPY app.py .
 COPY templates/ ./templates/
+# Vendored htmx. The UI used to fetch it from unpkg.com at page load, which
+# made it depend on the browser's own internet access. See static/README.md.
+COPY static/ ./static/
 
 # OCP/PSS runs containers with a random UID and GID 0. Make /app group-0 readable
 # so the random UID can exec the app. Don't set USER - OCP overrides it.

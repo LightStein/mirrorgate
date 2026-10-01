@@ -122,6 +122,18 @@ Secrets (`NEXUS_PASS`, `API_KEY`, `BASIC_AUTH_USER`, `BASIC_AUTH_PASS`) should b
 supplied via a Kubernetes `Secret` that you create out of band. See
 `chart/values.yaml` for the references.
 
+## No CDN dependency
+
+`htmx` is served from the image at `/static/htmx.min.js`, not fetched from a
+public CDN. Before v3.4.0 the page pulled it from unpkg at load time, which
+meant the whole UI depended on the *browser* reaching the public internet. A
+single blocked request - easy to arrange behind a corporate proxy - left the
+page rendered but completely inert: no polling, no form submit, no drawer,
+and nothing in the pod's logs to explain it.
+
+The vendored file, its checksum and its licence are in `static/`. There are
+no other outbound asset loads.
+
 ## Job history
 
 Every job is written to `$DATA_DIR/history.jsonl` and reloaded on start, so a

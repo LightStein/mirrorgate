@@ -11,7 +11,7 @@ Architecture:
   - JSON API at /api/* (X-API-Key auth) for CI pipelines
   - htmx UI at /ui/* (OAuth proxy in front in OCP) for humans
 """
-VERSION = '3.3.0'
+VERSION = '3.4.0'
 import os
 import re
 import hmac
@@ -603,7 +603,11 @@ health = RegistryHealth(REGISTRIES)
 # Flask app
 # =============================================================================
 
-app = Flask(__name__, template_folder='templates')
+# static/ holds the vendored htmx. Flask's default static route (/static) is
+# fine here - the basic-auth gate below covers it along with the rest of the
+# browser surface, and a client that has already loaded the page is holding
+# credentials the browser will resend.
+app = Flask(__name__, template_folder='templates', static_folder='static')
 
 
 def require_api_key(fn):

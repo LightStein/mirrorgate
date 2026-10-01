@@ -4,7 +4,8 @@
   <meta charset="utf-8">
   <title>mirrorgate</title>
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <script src="https://unpkg.com/htmx.org@1.9.12"></script>
+  <!-- Served from the image, never a CDN. See static/README.md for why. -->
+  <script src="{{ url_for('static', filename='htmx.min.js') }}"></script>
   <style>
     :root {
       --bg:      #0c0d10;
